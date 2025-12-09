@@ -12,12 +12,12 @@ import sys
 from playwright.async_api import async_playwright
 
 # Forçar UTF-8 no console Windows
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8')
-    sys.stderr.reconfigure(encoding='utf-8')
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # Constantes
-CACHE_FILE = "cache_processos.json"
+CACHE_FILE = "data/json/cache_processos.json"
 # Palavras, padrões e tipos descobertos por tentativa e erro
 PALAVRAS_INVALIDAS_JUIZ = ["Especial", "Cível", "Criminal", "Direito", "Vara"]
 PADROES_JUIZ = [
@@ -28,7 +28,7 @@ PADROES_JUIZ = [
 TIPOS_PARTE = ["Requerente", "Autor", "Massa Falida"]
 
 
-def ler_numeros_processos(arquivo_csv):
+def ler_numeros_processos(arquivo_csv="data/csv/numeros_processos.csv"):
     """Lê os números dos processos do arquivo CSV"""
     numeros = []
     with open(arquivo_csv, "r", encoding="utf-8") as f:
@@ -42,7 +42,7 @@ def carregar_decisoes():
     """Carrega o mapeamento de decisões (Procedência/Improcedência)"""
     decisoes_map = {}
     try:
-        with open("decisoes_resumo.csv", "r", encoding="utf-8") as f:
+        with open("data/csv/decisoes_resumo.csv", "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 numero = row["numero_processo"]
@@ -102,6 +102,20 @@ async def buscar_dados_processo(page, numero_processo):
             "https://esaj.tjce.jus.br/cpopg/open.do", wait_until="domcontentloaded"
         )
         await page.wait_for_load_state("networkidle")
+    except Exception as e:
+        # Se browser foi fechado, propagar exceção
+        if "closed" in str(e).lower():
+            raise
+        # Outros erros de navegação
+        print(f"   Erro de navegação: {str(e)}")
+        return {
+            "numero_processo": numero_processo,
+            "juiz": None,
+            "requerente": None,
+            "status": "erro",
+        }
+
+    try:
 
         # Selecionar opção "Outros"
         radio_outros = page.get_by_role("radio", name="Outros")
@@ -124,7 +138,7 @@ async def buscar_dados_processo(page, numero_processo):
         try:
             mensagem_erro = page.get_by_text("Não existem informações")
             if await mensagem_erro.is_visible(timeout=2000):
-                print(f"   Processo não encontrado")
+                print("   Processo não encontrado")
                 return {
                     "numero_processo": numero_processo,
                     "juiz": None,
@@ -224,7 +238,9 @@ async def buscar_texto_decisao(page):
             if await celula.is_visible(timeout=1000):
                 texto = await celula.inner_text()
                 if len(texto.strip()) > 50:
-                    print(f"   Decisao extraida: {len(texto)} chars")
+                    print(
+                        f"   Decisão extraída: {texto[:250]}...\nTamanho: {len(texto)} chars"
+                    )
                     return texto.strip()
 
         print("   Texto nao encontrado")
@@ -243,7 +259,7 @@ async def executar_scraping():
 
     # Ler números dos processos
     print("\n1. Lendo números dos processos...")
-    numeros_processos = ler_numeros_processos("numeros_processos.csv")
+    numeros_processos = ler_numeros_processos("data/csv/numeros_processos.csv")
     print(f"   Total de processos a buscar: {len(numeros_processos)}")
 
     # Carregar decisões
@@ -267,7 +283,6 @@ async def executar_scraping():
     ]
 
     if not processos_pendentes:
-        print("   Todos os processos ja foram coletados!")
         print("\n4. Salvando resultados finais...")
         salvar_resultados_finais(resultados, decisoes_map)
         return
@@ -285,44 +300,65 @@ async def executar_scraping():
 
         # Processar apenas números pendentes
         processos_no_cache = len(resultados)
-        for idx, numero in enumerate(processos_pendentes, 1):
-            total_geral = processos_no_cache + idx
-            print(
-                f"\n[{idx}/{len(processos_pendentes)} pendentes | {total_geral}/{len(numeros_processos)} total] Processando {numero}..."
-            )
 
-            # Buscar dados básicos (juiz e requerente)
-            resultado = await buscar_dados_processo(page, numero)
+        try:
+            for idx, numero in enumerate(processos_pendentes, 1):
+                total_geral = processos_no_cache + idx
+                print(
+                    f"\n[{idx}/{len(processos_pendentes)} pendentes | {total_geral}/{len(numeros_processos)} total] Processando {numero}..."
+                )
 
-            # Se encontrou o processo, buscar também o texto da decisão
-            if resultado["status"] in ["sucesso", "dados_incompletos"]:
-                texto_decisao = await buscar_texto_decisao(page)
-                resultado["texto_decisao"] = texto_decisao
-            else:
-                resultado["texto_decisao"] = None
+                try:
+                    # Buscar dados básicos (juiz e requerente)
+                    resultado = await buscar_dados_processo(page, numero)
 
-            resultados.append(resultado)
+                    # Se encontrou o processo, buscar também o texto da decisão
+                    if resultado["status"] in ["sucesso", "dados_incompletos"]:
+                        texto_decisao = await buscar_texto_decisao(page)
+                        resultado["texto_decisao"] = texto_decisao
+                    else:
+                        resultado["texto_decisao"] = None
 
-            # Salvar cache a cada 50 processos
-            if idx % 15 == 0:
-                salvar_cache(resultados)
+                    resultados.append(resultado)
 
-            # Pausa entre requisições
-            await asyncio.sleep(0.5)
+                    # Salvar cache a cada 15 processos
+                    if idx % 15 == 0:
+                        salvar_cache(resultados)
 
-        # Fechar browser
-        await context.close()
-        await browser.close()
+                    # Pausa entre requisições
+                    await asyncio.sleep(0.5)
+
+                except Exception as e:
+                    # Se browser foi fechado, parar execução
+                    if "closed" in str(e).lower():
+                        print("\n  Browser fechado")
+                        break
+                    resultados.append(
+                        {
+                            "numero_processo": numero,
+                            "juiz": None,
+                            "requerente": None,
+                            "texto_decisao": None,
+                            "status": "erro",
+                        }
+                    )
+
+        finally:
+            try:
+                await context.close()
+                await browser.close()
+            except Exception:
+                pass
 
     # Salvar cache final e resultados
-    print("\n5. Salvando resultados finais...")
+    print("\n   Salvando resultados finais...")
     salvar_cache(resultados)
     salvar_resultados_finais(resultados, decisoes_map)
 
     # Estatísticas
-    print("\n" + "=" * 60)
+    print("\n" + "-" * 30)
     print("ESTATÍSTICAS")
-    print("=" * 60)
+    print("-" * 30)
 
     print(f"Total de processos: {len(resultados)}")
     print(f"Sucesso: {sum(1 for r in resultados if r['status'] == 'sucesso')}")
@@ -334,7 +370,6 @@ async def executar_scraping():
     )
     print(f"Erros: {sum(1 for r in resultados if r['status'] == 'erro')}")
 
-    print("=" * 60)
 
 
 def salvar_resultados_finais(resultados, decisoes_map):
@@ -360,6 +395,8 @@ def salvar_resultados_finais(resultados, decisoes_map):
             f"    Processos com texto: {len(resultados_filtrados)} de {total_coletados} ({len(resultados_filtrados)/total_coletados*100:.1f}%)"
         )
 
+        print("    Output gerado:")
+
     # Adicionar id e sentenca_favoravel aos resultados
     resultados_completos = [
         {
@@ -377,14 +414,16 @@ def salvar_resultados_finais(resultados, decisoes_map):
     ]
 
     # Salvar em JSON
-    with open("dados_processos_tjce.json", "w", encoding="utf-8") as f:
+    with open("data/json/dados_processos_tjce.json", "w", encoding="utf-8") as f:
         json.dump(resultados_completos, f, indent=2, ensure_ascii=False)
     print(
-        f"    Arquivo JSON salvo: dados_processos_tjce.json ({len(resultados_completos)} processos válidos)"
+        f"    - Arquivo JSON salvo: dados_processos_tjce.json."
     )
 
     # Salvar em CSV
-    with open("dados_processos_tjce.csv", "w", encoding="utf-8", newline="") as f:
+    with open(
+        "data/csv/dados_processos_tjce.csv", "w", encoding="utf-8", newline=""
+    ) as f:
         writer = csv.DictWriter(
             f,
             fieldnames=[
@@ -400,7 +439,7 @@ def salvar_resultados_finais(resultados, decisoes_map):
         writer.writeheader()
         writer.writerows(resultados_completos)
     print(
-        f"    Arquivo CSV salvo: dados_processos_tjce.csv ({len(resultados_completos)} processos válidos)"
+        f"    - Arquivo CSV salvo: dados_processos_tjce.csv."
     )
 
 

@@ -16,9 +16,9 @@ import unicodedata
 import sys
 
 # Forçar UTF-8 no console Windows
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8')
-    sys.stderr.reconfigure(encoding='utf-8')
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 
 def extrair_features_temporais(data_ajuizamento_str, data_atualizacao_str):
@@ -27,7 +27,7 @@ def extrair_features_temporais(data_ajuizamento_str, data_atualizacao_str):
         # Converter dataAjuizamento (formato: 20250930000000)
         data_ajuiz = datetime.strptime(data_ajuizamento_str, "%Y%m%d%H%M%S")
 
-        # Converter dataHoraUltimaAtualizacao (formato ISO) - remover timezone para evitar erro
+        # Converter dataHoraUltimaAtualizacao (formato ISO)
         data_atual_str = data_atualizacao_str.replace("Z", "").split(".")[0]
         data_atual = datetime.fromisoformat(data_atual_str)
 
@@ -74,6 +74,7 @@ def extrair_features_assuntos(assuntos):
 def extrair_horario_decisao(movimentos):
     """
     Verifica se a decisão (Procedência/Improcedência) foi no horário de almoço (11h-13h)
+    Baseado no hungry judce effect: https://en.wikipedia.org/wiki/Hungry_judge_effect
 
     Returns:
         dict: {
@@ -89,7 +90,6 @@ def extrair_horario_decisao(movimentos):
 
             if data_hora:
                 try:
-                    # Formato ISO: "2025-09-25T11:03:41.000Z"
                     dt = datetime.fromisoformat(data_hora.replace("Z", "+00:00"))
                     hora = dt.hour
 
@@ -99,8 +99,8 @@ def extrair_horario_decisao(movimentos):
                     return {
                         "eh_horario_almoco": eh_horario_almoco,
                     }
-                except Exception as e:
-                    print(f"Erro ao processar dataHora: {e}")
+                except Exception:
+                    pass
 
     # Se não encontrou decisão ou não tem dataHora, retornar valores padrão
     return {
@@ -112,7 +112,7 @@ def extrair_features_movimentos(movimentos, dias_desde_ajuizamento):
     """Extrai features relacionadas aos movimentos do processo"""
     qtd_movimentos = len(movimentos)
 
-    # Calcular velocidade (evitar divisão por zero)
+    # Calcular velocidade
     velocidade = (
         qtd_movimentos / dias_desde_ajuizamento if dias_desde_ajuizamento > 0 else 0
     )
@@ -173,6 +173,7 @@ def processar_processo(processo_source):
     # Montar dicionário com apenas as features necessárias
     features = {
         "numero_processo": numero_processo,
+        # Desempacota features temporais com **
         **features_temporais,
         "municipio_fortaleza": municipio_fortaleza,
         **features_assuntos,
@@ -189,39 +190,32 @@ def executar_geracao_features():
     """
     Função principal: gera features para modelo ML
     """
-    print("=" * 80)
-    print("GERAÇÃO DE FEATURES PARA MODELO ML")
-    print("=" * 80)
+    print("=" * 60)
+    print("GERANDO FEATURES")
+    print("=" * 60)
 
     # 1. Carregar dados_completos.json
-    print("\n[1/4] Carregando dados_completos.json...")
-    with open("dados_completos.json", "r", encoding="utf-8") as f:
+    with open("data/json/dados_completos.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
     processos = data["hits"]["hits"]
     print(f"   OK {len(processos)} processos carregados")
 
     # 2. Extrair features de cada processo
-    print("\n[2/4] Extraindo features...")
     features_list = []
 
     for i, processo in enumerate(processos):
-        if (i + 1) % 1000 == 0:
-            print(f"   Processando: {i+1}/{len(processos)}")
-
         processo_source = processo["_source"]
         features = processar_processo(processo_source)
         features_list.append(features)
 
     df_features = pd.DataFrame(features_list)
-    print(f"   OK {len(df_features)} processos com features extraídas")
-    print(f"   OK {len(df_features.columns)} colunas geradas")
 
     # 3. Carregar dados_processos_com_sexo.csv e fazer merge
-    print("\n[3/5] Integrando com dados_processos_com_sexo.csv...")
+    print("\n1. Integrando com dados_processos_com_sexo.csv com merge em 'numeroProcesso'...")
     try:
-        df_sexo = pd.read_csv("dados_processos_com_sexo.csv")
-        print(f"   OK {len(df_sexo)} processos com dados de sexo carregados")
+        df_sexo = pd.read_csv("data/csv/dados_processos_com_sexo.csv")
+        print(f"   {len(df_sexo)} processos com dados de sexo carregados")
 
         # Converter numero_processo para string com zeros à esquerda (20 dígitos)
         df_sexo["numero_processo"] = (
@@ -245,7 +239,7 @@ def executar_geracao_features():
             how="inner",
         )
 
-        print(f"   OK Merge realizado: {len(df_final)} processos no dataset final")
+        print(f"   Merge realizado: {len(df_final)} processos no dataset final")
 
     except FileNotFoundError:
         print("   AVISO: Arquivo dados_processos_com_sexo.csv não encontrado")
@@ -253,13 +247,11 @@ def executar_geracao_features():
         df_final = df_features
 
     # 4. Filtrar apenas registros com status 'sucesso' e transformar dados
-    print("\n[4/5] Limpando e transformando dados...")
-    registros_antes = len(df_final)
+    print("\n2. Limpando dados...")
     df_final = df_final[df_final["status"] == "sucesso"].copy()
-    print(f"   OK Filtrados {len(df_final)} registros com status 'sucesso'")
-    print(f"   OK Removidos {registros_antes - len(df_final)} registros")
-
+    print(f"   Filtrados {len(df_final)} registros com status 'sucesso'")
     # Transformar sexo em binário (0=M, 1=F, -1=Indefinido)
+
     df_final["sexo_juiz_bin"] = (
         df_final["sexo_juiz"]
         .map({"M": 0, "F": 1, "Indefinido": -1})
@@ -272,20 +264,20 @@ def executar_geracao_features():
         .fillna(-1)
         .astype(int)
     )
-    print("   OK Sexo convertido (0=M, 1=F, -1=Indefinido)")
+    print("   Sexo convertido (0=M, 1=F, -1=Indefinido)")
 
     # Transformar sentenca_favoravel em binário
     df_final["sentenca_favoravel"] = (
         df_final["sentenca_favoravel"]
-        .map({True: 1, False: 0, "True": 1, "False": 0, 1: 1, 0: 0})
+        .map({True: 1, False: 0, "True": 1, "False": 0})
         .fillna(0)
         .astype(int)
     )
-    print("   OK Sentença convertida (0=Improcedente, 1=Procedente)")
+    print("   Sentença convertida (0=Improcedente, 1=Procedente)")
 
     # Criar features binárias para cada assunto principal
     assuntos_unicos = df_final["assunto_principal"].unique()
-    print(f"   OK Criando {len(assuntos_unicos)} features de assunto...")
+    print(f"   Criando {len(assuntos_unicos)} features de assunto...")
 
     for assunto in assuntos_unicos:
         # Limpar nome do assunto - remove acentos e caracteres especiais
@@ -305,6 +297,7 @@ def executar_geracao_features():
         nome_feature = f"eh_{nome_limpo}"[:60]
 
         df_final[nome_feature] = (df_final["assunto_principal"] == assunto).astype(int)
+        df_final = df_final.query('sexo_juiz_bin != -1 and sexo_requerente_bin != -1')
 
     # Remover colunas desnecessárias
     colunas_remover = [
@@ -319,18 +312,18 @@ def executar_geracao_features():
     # Criar ID genérico
     df_final.insert(0, "id", range(1, len(df_final) + 1))
 
-    print(f"   OK Dataset final com {len(df_final.columns)} features")
+    print(f"   Dataset final com {len(df_final.columns)} features")
 
     # 5. Salvar dataset final
-    print("\n[5/5] Salvando dataset_ml_limpo.csv...")
-    output_file = "dataset_ml_limpo.csv"
+    print("\n3.  Salvando dados...")
+    output_file = "data/csv/dataset.csv"
     df_final.to_csv(output_file, index=False, encoding="utf-8")
-    print(f"   OK Dataset salvo: {output_file}")
+    print(f"   Dataset salvo: {output_file}")
 
     # Estatísticas finais
-    print("\n" + "=" * 80)
-    print("RESUMO DO DATASET FINAL")
-    print("=" * 80)
+    print("\n" + "-" * 30)
+    print("RESUMO DO DATASET")
+    print("-" * 30)
     print(f"\nTotal de processos: {len(df_final)}")
     print(f"Total de features: {len(df_final.columns)}")
 
@@ -338,36 +331,17 @@ def executar_geracao_features():
     for i, col in enumerate(df_final.columns, 1):
         print(f"  {i:2d}. {col}")
 
-    print("\nDISTRIBUICOES:")
+    print("\nDISTRIBUIÇÕES:")
     print("\nSexo dos Juizes:")
     print(f"  - Masculino (0): {(df_final['sexo_juiz_bin'] == 0).sum()}")
     print(f"  - Feminino (1): {(df_final['sexo_juiz_bin'] == 1).sum()}")
-    print(f"  - Indefinido (-1): {(df_final['sexo_juiz_bin'] == -1).sum()}")
 
     print(f"\nSexo dos Requerentes:")
     print(f"  - Masculino (0): {(df_final['sexo_requerente_bin'] == 0).sum()}")
     print(f"  - Feminino (1): {(df_final['sexo_requerente_bin'] == 1).sum()}")
-    print(f"  - Indefinido (-1): {(df_final['sexo_requerente_bin'] == -1).sum()}")
 
     print(f"\nSentenças:")
     print(f"  - Improcedente (0): {(df_final['sentenca_favoravel'] == 0).sum()}")
-    print(f"  - Procedente (1): {(df_final['sentenca_favoravel'] == 1).sum()}")
-
-    print("\nPREVIEW (5 primeiras linhas):")
-    print(df_final.head())
-
-    # Verificar valores faltantes
-    print("\nValores faltantes:")
-    missing = df_final.isnull().sum()
-    if missing.sum() > 0:
-        print(missing[missing > 0])
-    else:
-        print("   OK Nenhum valor faltante!")
-
-    print("\n" + "=" * 80)
-    print("PROCESSO CONCLUIDO!")
-    print("=" * 80)
-
 
 if __name__ == "__main__":
     executar_geracao_features()

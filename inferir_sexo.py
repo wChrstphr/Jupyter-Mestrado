@@ -3,14 +3,14 @@ import os
 import sys
 
 # Forçar UTF-8 no console Windows
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8')
-    sys.stderr.reconfigure(encoding='utf-8')
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # Configurações
-ARQUIVO_PROCESSOS = "dados_processos_tjce.csv"
-ARQUIVO_NOMES = "nomes.csv.gz"
-ARQUIVO_SAIDA = "dados_processos_com_sexo.csv"
+ARQUIVO_PROCESSOS = "data/csv/dados_processos_tjce.csv"
+ARQUIVO_NOMES = "data/nomes/nomes.csv.gz"
+ARQUIVO_SAIDA = "data/csv/dados_processos_com_sexo.csv"
 
 
 def carregar_banco_nomes(arquivo_nomes):
@@ -23,6 +23,8 @@ def carregar_banco_nomes(arquivo_nomes):
         compression="gzip",
         encoding="utf-8",
     )
+
+    print("\n1. Verificando headers do csv de nomes brasileiros:")
     print(df_nomes.columns)
 
     return df_nomes
@@ -80,9 +82,10 @@ def inferir_sexo_processos(
         extrair_primeiro_nome
     )
     # print primeiros registros de df_processos
-    print("\nPrimeiros registros de df_processos após extração de primeiros nomes:")
+    print("\n2. Extraindo primeiros nomes das partes:\n   Primeiros registros de df_processos após extração de primeiros nomes:")
     print(df_processos.head())
 
+    print("\n3. Inferindo sexo dos juízes e requerentes...")
     df_processos["sexo_juiz"] = df_processos["primeiro_nome_juiz"].apply(
         lambda x: buscar_sexo(x, df_nomes, coluna_nome, coluna_sexo)
     )
@@ -104,13 +107,16 @@ def executar_inferencia_sexo():
     Função principal: infere sexo de juízes e requerentes
     """
     # Verifica se os arquivos existem
+    print("\n" + "=" * 60)
+    print("INFERÊNCIA DE SEXO NOS PROCESSOS")
+    print("=" * 60)
+
     if not os.path.exists(ARQUIVO_PROCESSOS):
         print(f"Erro: Arquivo {ARQUIVO_PROCESSOS} não encontrado!")
         return
 
     if not os.path.exists(ARQUIVO_NOMES):
         print(f"Erro: Arquivo {ARQUIVO_NOMES} não encontrado!")
-        print(f"Por favor, adicione o banco de dados de nomes brasileiros ao projeto.")
         return
 
     # Carrega banco de nomes
@@ -129,12 +135,12 @@ def executar_inferencia_sexo():
 
     # Salva resultado
     df_resultado.to_csv(ARQUIVO_SAIDA, index=False, encoding="utf-8")
-    print(f"\nResultado salvo em {ARQUIVO_SAIDA}")
+    print(f"\n4. Salvando resultados em {ARQUIVO_SAIDA}")
 
     # Estatísticas
-    print(f"\n{'='*60}")
+    print(f"\n{'-'*30}")
     print(f"ESTATÍSTICAS")
-    print(f"{'='*60}")
+    print(f"{'-'*30}")
 
     print(f"\nSexo dos Juízes:")
     print(df_resultado["sexo_juiz"].value_counts())
@@ -143,9 +149,9 @@ def executar_inferencia_sexo():
     print(df_resultado["sexo_requerente"].value_counts())
 
     # Amostra do resultado
-    print(f"\n{'='*60}")
-    print(f"AMOSTRA DO RESULTADO")
-    print(f"{'='*60}")
+    print(f"\n{'-'*30}")
+    print(f"AMOSTRA")
+    print(f"{'-'*30}")
     print(df_resultado[["juiz", "sexo_juiz", "requerente", "sexo_requerente"]].head(10))
 
 
