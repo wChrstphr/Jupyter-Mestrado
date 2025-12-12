@@ -10,6 +10,7 @@ import re
 import os
 import sys
 from playwright.async_api import async_playwright
+from urllib.parse import unquote, urlparse, parse_qs
 
 # Forçar UTF-8 no console Windows
 if sys.platform == "win32":
@@ -36,24 +37,6 @@ def ler_numeros_processos(arquivo_csv="data/csv/numeros_processos.csv"):
         for row in reader:
             numeros.append(row["numeroProcesso"])
     return numeros
-
-
-def carregar_decisoes():
-    """Carrega o mapeamento de decisões (Procedência/Improcedência)"""
-    decisoes_map = {}
-    try:
-        with open("data/csv/decisoes_resumo.csv", "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                numero = row["numero_processo"]
-                tipo = row["tipo_decisao"]
-                # Procedência = True, else False
-                sentenca_favoravel = "Procedência" in tipo
-                decisoes_map[numero] = sentenca_favoravel
-        print(f"   Decisoes carregadas: {len(decisoes_map)} processos")
-    except Exception as e:
-        print(f"   Erro ao carregar decisoes: {e}")
-    return decisoes_map
 
 
 def carregar_cache():
@@ -210,45 +193,78 @@ async def buscar_dados_processo(page, numero_processo):
         }
 
 
-async def buscar_texto_decisao(page):
+async def baixar_pdf_decisao(page, numero_processo, browser):
     """
-    Busca o texto completo da decisão no site do TJCE.
-    O texto está na célula da tabela de movimentos.
-
-    Retorna: str com o texto da decisão ou None se não encontrado
+    Baixa o PDF da sentença do processo.
+    
+    Args:
+        page: Página do Playwright já navegada para o processo
+        numero_processo: Número do processo para nome do arquivo
+        browser: Instância do browser para obter contexto
+    
+    Retorna: bool indicando sucesso do download
     """
     try:
-        # Expandir movimentações completas
-        link_mov = page.locator("#linkmovimentacoes")
-        if await link_mov.is_visible(timeout=2000):
-            await link_mov.click()
-            await asyncio.sleep(0.8)
-
-        # Termos de decisão (ordem de prioridade)
-        termos = [
-            "Julgado procedente o pedido",
-            "Julgado improcedente o pedido",
-            "Procedência",
-            "Improcedência",
-        ]
-
-        # Buscar célula com decisão
-        for termo in termos:
-            celula = page.get_by_role("cell", name=termo)
-            if await celula.is_visible(timeout=1000):
-                texto = await celula.inner_text()
-                if len(texto.strip()) > 50:
-                    print(
-                        f"   Decisão extraída: {texto[:250]}...\nTamanho: {len(texto)} chars"
-                    )
-                    return texto.strip()
-
-        print("   Texto nao encontrado")
-        return None
-
+        # Expandir movimentações se ainda não expandidas
+        link_mais = page.locator("#linkmovimentacoes")
+        if await link_mais.is_visible(timeout=2000):
+            await link_mais.click()
+            await asyncio.sleep(0.5)
+        
+        # Localizar link do documento "Julgado"
+        link = page.locator("xpath=//a[@class='linkMovVincProc' and contains(text(), 'Julgado')]")
+        
+        # Verificar se o link existe
+        if not await link.is_visible(timeout=2000):
+            print("   PDF: Link 'Julgado' não encontrado (possível segredo de justiça)")
+            return False
+        
+        url_relativa = await link.get_attribute("href")
+        url_completa = "https://esaj.tjce.jus.br" + url_relativa
+        
+        # Navegar para a página do viewer e aguardar carregamento
+        await page.goto(url_completa, wait_until="networkidle")
+        await asyncio.sleep(2)
+        
+        # Extrair URL do PDF do iframe
+        iframe = page.locator("iframe")
+        if not await iframe.is_visible(timeout=3000):
+            print("   PDF: Iframe não encontrado")
+            return False
+        
+        viewer_url = await iframe.get_attribute("src")
+        
+        # Extrair caminho real do PDF do parâmetro file=
+        parsed = urlparse(viewer_url)
+        params = parse_qs(parsed.query)
+        
+        if "file" not in params:
+            print("   PDF: Parâmetro 'file' não encontrado na URL do viewer")
+            return False
+        
+        pdf_path = unquote(params["file"][0])
+        pdf_url = "https://esaj.tjce.jus.br" + pdf_path
+        
+        # Baixar PDF mantendo sessão do browser
+        os.makedirs("datas", exist_ok=True)
+        context = browser.contexts[0]
+        response = await context.request.get(pdf_url)
+        
+        if response.ok:
+            pdf_bytes = await response.body()
+            # Nome do arquivo: decisao_[numeroProcesso].pdf
+            filename = f"datas/decisao_{numero_processo}.pdf"
+            with open(filename, "wb") as f:
+                f.write(pdf_bytes)
+            print(f"   PDF: ✓ Baixado ({len(pdf_bytes)} bytes) -> {filename}")
+            return True
+        else:
+            print(f"   PDF: ✗ Erro HTTP {response.status}")
+            return False
+        
     except Exception as e:
-        print(f"   Erro: {str(e)}")
-        return None
+        print(f"   PDF: Erro ao baixar - {str(e)}")
+        return False
 
 
 async def executar_scraping():
@@ -262,12 +278,8 @@ async def executar_scraping():
     numeros_processos = ler_numeros_processos("data/csv/numeros_processos.csv")
     print(f"   Total de processos a buscar: {len(numeros_processos)}")
 
-    # Carregar decisões
-    print("\n2. Carregando decisões...")
-    decisoes_map = carregar_decisoes()
-
     # Carregar cache
-    print("\n3. Verificando cache...")
+    print("\n2. Verificando cache...")
     cache_completo = carregar_cache()
 
     # Pega processos já coletados
@@ -283,14 +295,14 @@ async def executar_scraping():
     ]
 
     if not processos_pendentes:
-        print("\n4. Salvando resultados finais...")
-        salvar_resultados_finais(resultados, decisoes_map)
+        print("\n3. Salvando resultados finais...")
+        salvar_resultados_finais(resultados)
         return
 
     print(f"   Processos pendentes: {len(processos_pendentes)}")
 
     # Iniciar scraping
-    print("\n4. Iniciando coleta de dados...")
+    print("\n3. Iniciando coleta de dados...")
 
     async with async_playwright() as playwright:
         # Configurar browser
@@ -312,12 +324,12 @@ async def executar_scraping():
                     # Buscar dados básicos (juiz e requerente)
                     resultado = await buscar_dados_processo(page, numero)
 
-                    # Se encontrou o processo, buscar também o texto da decisão
+                    # Se encontrou o processo, baixar PDF da sentença
                     if resultado["status"] in ["sucesso", "dados_incompletos"]:
-                        texto_decisao = await buscar_texto_decisao(page)
-                        resultado["texto_decisao"] = texto_decisao
+                        pdf_baixado = await baixar_pdf_decisao(page, numero, browser)
+                        resultado["pdf_baixado"] = pdf_baixado
                     else:
-                        resultado["texto_decisao"] = None
+                        resultado["pdf_baixado"] = False
 
                     resultados.append(resultado)
 
@@ -338,7 +350,7 @@ async def executar_scraping():
                             "numero_processo": numero,
                             "juiz": None,
                             "requerente": None,
-                            "texto_decisao": None,
+                            "pdf_baixado": False,
                             "status": "erro",
                         }
                     )
@@ -353,7 +365,7 @@ async def executar_scraping():
     # Salvar cache final e resultados
     print("\n   Salvando resultados finais...")
     salvar_cache(resultados)
-    salvar_resultados_finais(resultados, decisoes_map)
+    salvar_resultados_finais(resultados)
 
     # Estatísticas
     print("\n" + "-" * 30)
@@ -362,52 +374,34 @@ async def executar_scraping():
 
     print(f"Total de processos: {len(resultados)}")
     print(f"Sucesso: {sum(1 for r in resultados if r['status'] == 'sucesso')}")
-    print(
-        f"Não encontrados: {sum(1 for r in resultados if r['status'] == 'nao_encontrado')}"
-    )
-    print(
-        f"Dados incompletos: {sum(1 for r in resultados if r['status'] == 'dados_incompletos')}"
-    )
+    print(f"Não encontrados: {sum(1 for r in resultados if r['status'] == 'nao_encontrado')}")
+    print(f"Dados incompletos: {sum(1 for r in resultados if r['status'] == 'dados_incompletos')}")
     print(f"Erros: {sum(1 for r in resultados if r['status'] == 'erro')}")
+    print(f"PDFs baixados: {sum(1 for r in resultados if r.get('pdf_baixado', False))}")
 
 
-
-def salvar_resultados_finais(resultados, decisoes_map):
-    """Salva os resultados finais em JSON e CSV com id, sentenca_favoravel e texto_decisao"""
-    # Filtrar apenas processos com sucesso E que tenham texto da decisão
+def salvar_resultados_finais(resultados):
+    """Salva os resultados finais em CSV (posteriormente será adicionado texto extraído dos PDFs)"""
+    # Filtrar apenas processos encontrados (sucesso ou dados_incompletos)
     resultados_filtrados = [
         r
         for r in resultados
         if r["status"] not in ["nao_encontrado", "erro"]
-        and r.get("texto_decisao") is not None
     ]
 
-    # Informar quantos processos foram filtrados
-    total_coletados = len(
-        [r for r in resultados if r["status"] not in ["nao_encontrado", "erro"]]
-    )
-    processos_sem_texto = total_coletados - len(resultados_filtrados)
-    if processos_sem_texto > 0:
-        print(
-            f"    Filtrados {processos_sem_texto} processos sem texto da decisao (segredo de justica)"
-        )
-        print(
-            f"    Processos com texto: {len(resultados_filtrados)} de {total_coletados} ({len(resultados_filtrados)/total_coletados*100:.1f}%)"
-        )
+    print(f"    Processos coletados: {len(resultados_filtrados)} de {len(resultados)}")
+    print(f"    PDFs baixados: {sum(1 for r in resultados_filtrados if r.get('pdf_baixado', False))}")
+    print("\n    Output gerado:")
 
-        print("    Output gerado:")
-
-    # Adicionar id e sentenca_favoravel aos resultados
+    # Preparar resultados para CSV (texto_decisao será adicionado posteriormente)
     resultados_completos = [
         {
             "id": idx,
             "numero_processo": resultado["numero_processo"],
             "juiz": resultado.get("juiz"),
             "requerente": resultado.get("requerente"),
-            "texto_decisao": resultado.get(
-                "texto_decisao"
-            ),  # Adicionar texto da decisão
-            "sentenca_favoravel": decisoes_map.get(resultado["numero_processo"]),
+            "pdf_baixado": resultado.get("pdf_baixado", False),
+            "texto_decisao": "",  # Será preenchido posteriormente com extração dos PDFs
             "status": resultado["status"],
         }
         for idx, resultado in enumerate(resultados_filtrados, 1)
@@ -416,9 +410,7 @@ def salvar_resultados_finais(resultados, decisoes_map):
     # Salvar em JSON
     with open("data/json/dados_processos_tjce.json", "w", encoding="utf-8") as f:
         json.dump(resultados_completos, f, indent=2, ensure_ascii=False)
-    print(
-        f"    - Arquivo JSON salvo: dados_processos_tjce.json."
-    )
+    print("    - Arquivo JSON salvo: data/json/dados_processos_tjce.json")
 
     # Salvar em CSV
     with open(
@@ -431,16 +423,14 @@ def salvar_resultados_finais(resultados, decisoes_map):
                 "numero_processo",
                 "juiz",
                 "requerente",
+                "pdf_baixado",
                 "texto_decisao",
-                "sentenca_favoravel",
                 "status",
             ],
         )
         writer.writeheader()
         writer.writerows(resultados_completos)
-    print(
-        f"    - Arquivo CSV salvo: dados_processos_tjce.csv."
-    )
+    print("    - Arquivo CSV salvo: data/csv/dados_processos_tjce.csv")
 
 
 async def executar_pipeline_scraping():
