@@ -1,0 +1,13 @@
+.env
+/venv
+*venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+
+# Logs temporários
+*.log
+scraping_playwright_*.log
+coleta_*.log

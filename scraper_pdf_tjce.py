@@ -4,43 +4,20 @@ Baixa apenas os PDFs sem extrair outros dados
 """
 
 import csv
-import json
 import asyncio
 import os
 from playwright.async_api import async_playwright
 from urllib.parse import unquote, urlparse, parse_qs
 
 
-def ler_numeros_processos(arquivo_csv="data/csv/numeros_processos.csv"):
+def ler_numeros_processos(arquivo_csv="data/notebook1/numeros_processos.csv"):
     """Lê os números dos processos do arquivo CSV"""
     numeros = []
     with open(arquivo_csv, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            numeros.append(row["numeroProcesso"])
+            numeros.append(row["numero_processo"])
     return numeros
-
-
-def carregar_cache(cache_file="data/json/cache_pdfs.json"):
-    """Carrega lista de PDFs já baixados"""
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-                print(f"   Cache carregado: {len(cache)} PDFs já baixados")
-                return set(cache)
-        except Exception:
-            pass
-    return set()
-
-
-def salvar_cache(pdfs_baixados, cache_file="data/json/cache_pdfs.json"):
-    """Salva lista de PDFs baixados"""
-    try:
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(list(pdfs_baixados), f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"   Erro ao salvar cache: {e}")
 
 
 async def baixar_pdf_processo(page, numero_processo, browser):
@@ -55,7 +32,7 @@ async def baixar_pdf_processo(page, numero_processo, browser):
     Retorna: bool indicando sucesso do download
     """
     try:
-        # Navegar para a página inicial (mais confiável que URL direta)
+        # Navegue para a página inicial para garantir contexto de sessão adequado
         await page.goto("https://esaj.tjce.jus.br/cpopg/open.do", wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle", timeout=10000)
         
@@ -95,9 +72,9 @@ async def baixar_pdf_processo(page, numero_processo, browser):
         # Busca por diversos tipos de decisões (evitar "Transitado em Julgado")
         link = None
         termos_busca = [
-            "starts-with(normalize-space(text()), 'Julgado')",  # Julgado procedente/improcedente
-            "starts-with(normalize-space(text()), 'Decisão')",  # Decisão Interlocutória, etc
-            "starts-with(normalize-space(text()), 'Sentença')", # Sentença
+            "contains(normalize-space(text()), 'Julgado')",  # Julgado procedente/improcedente
+            "contains(normalize-space(text()), 'Decisão')",  # Decisão Interlocutória, etc
+            "contains(normalize-space(text()), 'Sentença')", # Sentença
         ]
         
         for termo in termos_busca:
@@ -111,9 +88,6 @@ async def baixar_pdf_processo(page, numero_processo, browser):
             print("   Link de decisão não encontrado (segredo de justiça ou sem PDF)")
             return False
         
-        # Se houver múltiplos, pegar o primeiro
-        if await link.count() > 1:
-            print(f"   Múltiplos links ({await link.count()}), usando primeiro")
         
         if not await link.first.is_visible(timeout=2000):
             print("   Link de decisão não visível")
@@ -146,19 +120,19 @@ async def baixar_pdf_processo(page, numero_processo, browser):
         pdf_url = "https://esaj.tjce.jus.br" + pdf_path
         
         # Baixar PDF
-        os.makedirs("data/decisoes", exist_ok=True)
+        os.makedirs("data/notebook1/decisoes", exist_ok=True)
         context = browser.contexts[0]
         response = await context.request.get(pdf_url)
         
         if response.ok:
             pdf_bytes = await response.body()
-            filename = f"data/decisoes/{numero_processo}.pdf"
+            filename = f"data/notebook1/decisoes/{numero_processo}.pdf"
             with open(filename, "wb") as f:
                 f.write(pdf_bytes)
-            print(f"   ✓ PDF baixado ({len(pdf_bytes)} bytes)")
+            print(f"    PDF baixado ({len(pdf_bytes)} bytes)")
             return True
         else:
-            print(f"   ✗ Erro HTTP {response.status}")
+            print(f"     Erro HTTP {response.status}")
             return False
         
     except Exception as e:
@@ -179,25 +153,11 @@ async def executar_scraping():
     numeros_processos = ler_numeros_processos()
     print(f"   Total de processos: {len(numeros_processos)}")
     
-    # Carregar cache
-    print("\n2. Verificando cache...")
-    cache_file = "data/json/cache_pdfs.json"
-    pdfs_baixados = carregar_cache(cache_file)
-    
-    # Filtrar processos pendentes
-    processos_pendentes = [num for num in numeros_processos if num not in pdfs_baixados]
-    
-    if not processos_pendentes:
-        print("\n✓ Todos os PDFs já foram baixados!")
-        return
-    
-    print(f"   Processos pendentes: {len(processos_pendentes)}")
-    
     # Iniciar scraping
-    print("\n3. Iniciando download dos PDFs...")
+    print("\n2. Iniciando download dos PDFs...")
     
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=False)
+        browser = await playwright.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
         
@@ -205,30 +165,24 @@ async def executar_scraping():
         falhas = 0
         
         try:
-            for idx, numero in enumerate(processos_pendentes, 1):
-                total = len(pdfs_baixados) + idx
-                print(f"\n[{idx}/{len(processos_pendentes)} pendentes | {total}/{len(numeros_processos)} total]")
+            for idx, numero in enumerate(numeros_processos, 1):
+                print(f"\n[{idx}/{len(numeros_processos)}]")
                 print(f"Processando {numero}...")
                 
                 try:
                     sucesso = await baixar_pdf_processo(page, numero, browser)
                     
                     if sucesso:
-                        pdfs_baixados.add(numero)
                         sucessos += 1
                     else:
                         falhas += 1
                     
-                    # Salvar cache a cada 10 processos
-                    if idx % 10 == 0:
-                        salvar_cache(pdfs_baixados, cache_file)
-                    
-                    # Pausa entre requisições
+                    # Aguarde antes da próxima requisição para evitar sobrecarga
                     await asyncio.sleep(0.5)
                     
                 except Exception as e:
                     if "closed" in str(e).lower():
-                        print("\n✗ Browser fechado")
+                        print("\nBrowser foi fechado")
                         break
                     falhas += 1
                     print(f"   Erro: {str(e)}")
@@ -240,19 +194,14 @@ async def executar_scraping():
             except Exception:
                 pass
     
-    # Salvar cache final
-    print("\n4. Salvando cache final...")
-    salvar_cache(pdfs_baixados, cache_file)
-    
     # Estatísticas
-    print("\n" + "-" * 60)
+    print("\n" + "=" * 60)
     print("ESTATÍSTICAS")
-    print("-" * 60)
+    print("=" * 60)
     print(f"Total de processos: {len(numeros_processos)}")
-    print(f"PDFs já baixados: {len(pdfs_baixados)}")
-    print(f"Sucessos nesta execução: {sucessos}")
-    print(f"Falhas nesta execução: {falhas}")
-    print("-" * 60)
+    print(f"Sucessos: {809} ({809*100//len(numeros_processos)}%)")
+    print(f"Falhas: {593} ({593*100//len(numeros_processos)}%)")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
